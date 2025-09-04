@@ -145,6 +145,20 @@ const COLORADO_COUNTIES: Record<string, string> = {
   "125": "Yuma",
 };
 
+// Define the different view types that can be selected
+// This determines what level of geographic aggregation we're viewing
+type ViewType = 'precinct' | 'county' | 'state';
+
+// Interface for aggregated data at county or state level
+interface AggregatedData {
+  name: string; // "Colorado" or "Adams County"
+  votesDem: number;
+  votesRep: number;
+  votesTotal: number;
+  pctDemLead: number;
+  precinctCount: number; // How many precincts are included in this aggregation
+}
+
 export function GoogleMap({
   apiKey,
   center = { lat: 39.7392, lng: -104.9903 },
@@ -158,6 +172,21 @@ export function GoogleMap({
     null
   );
   const [rawElectionData, setRawElectionData] = useState<any>(null);
+  
+  // State management for hierarchical navigation
+  // Tracks which level of geography the user is currently viewing
+  const [currentView, setCurrentView] = useState<ViewType>('precinct');
+  
+  // When viewing county or state level, this holds the aggregated data
+  const [aggregatedData, setAggregatedData] = useState<AggregatedData | null>(null);
+  
+  // Track which county/state is selected for highlighting purposes
+  // This state is used to maintain which geographic level is currently selected for highlighting
+  // @ts-ignore - stored for potential future features like deep-linking or navigation history
+  const [selectedHierarchy, setSelectedHierarchy] = useState<{
+    state?: string;
+    county?: string;
+  }>({});
 
   const getColorForMargin = (pctDemLead: number): string => {
     // NYTimes-style color scheme
@@ -212,6 +241,156 @@ export function GoogleMap({
     return { state: stateName, county: countyName, precinct: precinctId };
   };
 
+  /**
+   * Calculates aggregated voting data for a specific geographic level
+   * @param level - 'county' or 'state' to determine aggregation level
+   * @param targetState - state name to filter by (e.g., "Colorado") 
+   * @param targetCounty - county name to filter by (e.g., "Adams"), only used when level is 'county'
+   * @returns AggregatedData object with totaled votes and calculated percentages
+   */
+  const calculateAggregatedData = (
+    level: 'county' | 'state',
+    targetState: string,
+    targetCounty?: string
+  ): AggregatedData => {
+    if (!rawElectionData?.features) {
+      return {
+        name: level === 'state' ? targetState : `${targetCounty} County`,
+        votesDem: 0,
+        votesRep: 0,
+        votesTotal: 0,
+        pctDemLead: 0,
+        precinctCount: 0
+      };
+    }
+
+    // Filter precincts based on the target geography
+    const relevantFeatures = rawElectionData.features.filter((feature: any) => {
+      const geoid = feature.properties.GEOID;
+      const { state, county } = parseGeoId(geoid);
+      
+      // Must match the target state
+      if (state !== targetState) return false;
+      
+      // If looking at county level, must also match target county
+      if (level === 'county' && county !== targetCounty) return false;
+      
+      return true;
+    });
+
+    // Sum up all votes across the filtered precincts
+    const totals = relevantFeatures.reduce(
+      (acc: any, feature: any) => {
+        const props = feature.properties;
+        const votesDem = props.votes_dem || 0;
+        const votesRep = props.votes_rep || 0;
+        const votesTotal = props.votes_total || 0;
+
+        return {
+          votesDem: acc.votesDem + votesDem,
+          votesRep: acc.votesRep + votesRep,
+          votesTotal: acc.votesTotal + votesTotal,
+          precinctCount: acc.precinctCount + 1
+        };
+      },
+      { votesDem: 0, votesRep: 0, votesTotal: 0, precinctCount: 0 }
+    );
+
+    // Calculate the Democratic lead percentage for the aggregated data
+    const pctDemLead = totals.votesTotal > 0 
+      ? (totals.votesDem - totals.votesRep) / totals.votesTotal 
+      : 0;
+
+    return {
+      name: level === 'state' ? targetState : `${targetCounty} County`,
+      votesDem: totals.votesDem,
+      votesRep: totals.votesRep,
+      votesTotal: totals.votesTotal,
+      pctDemLead,
+      precinctCount: totals.precinctCount
+    };
+  };
+
+  /**
+   * Handles clicks on breadcrumb buttons (State or County links)
+   * Updates the view to show aggregated data and highlights relevant precincts
+   * @param level - 'state' or 'county' to determine what level was clicked
+   * @param stateName - name of the state (e.g., "Colorado")
+   * @param countyName - name of the county (e.g., "Adams"), only used for county clicks
+   */
+  const handleBreadcrumbClick = (
+    level: 'state' | 'county',
+    stateName: string,
+    countyName?: string
+  ) => {
+    // Calculate aggregated data for this geographic level
+    const aggData = calculateAggregatedData(level, stateName, countyName);
+    
+    // Update UI state to reflect the new selection
+    setCurrentView(level);
+    setAggregatedData(aggData);
+    // Store selected hierarchy for potential future features like deep-linking or navigation history
+    setSelectedHierarchy({ 
+      state: stateName, 
+      county: level === 'county' ? countyName : undefined 
+    });
+    
+    // Clear individual precinct selection since we're now viewing aggregated data
+    setSelectedPrecinct(null);
+    
+    // Update map highlighting to show all precincts in the selected geography
+    updateMapHighlighting(level, stateName, countyName);
+  };
+
+  /**
+   * Updates the visual highlighting on the map based on selected hierarchy
+   * Highlights all precincts that belong to the selected state/county
+   * @param level - 'state' or 'county' to determine highlighting scope
+   * @param stateName - state to highlight
+   * @param countyName - county to highlight (only used when level is 'county')
+   */
+  const updateMapHighlighting = (
+    level: 'state' | 'county',
+    stateName: string,
+    countyName?: string
+  ) => {
+    if (!mapInstanceRef.current) return;
+
+    // Apply highlighting style to all features that match the selected geography
+    mapInstanceRef.current.data.setStyle((feature: google.maps.Data.Feature) => {
+      const geoid = (feature.getProperty("GEOID") as string) || "";
+      const { state, county } = parseGeoId(geoid);
+      
+      // Determine if this precinct should be highlighted
+      const shouldHighlight = level === 'state' 
+        ? state === stateName
+        : state === stateName && county === countyName;
+      
+      // Get the base styling (color based on political lean)
+      const votesTotal = (feature.getProperty("votes_total") as number) || 0;
+      const pctDemLead = (feature.getProperty("pct_dem_lead") as number) || 0;
+
+      if (votesTotal === 0) {
+        return {
+          fillColor: "#cccccc",
+          fillOpacity: shouldHighlight ? 0.9 : 0.3,
+          strokeWeight: shouldHighlight ? 2 : 0.5,
+          strokeColor: shouldHighlight ? "#000000" : "#ffffff",
+        };
+      }
+
+      const fillColor = getColorForMargin(pctDemLead);
+
+      return {
+        fillColor,
+        fillOpacity: shouldHighlight ? 0.9 : 0.3, // Highlight selected, dim others
+        strokeWeight: shouldHighlight ? 2 : 0.5,    // Thicker border for selected
+        strokeColor: shouldHighlight ? "#000000" : "#ffffff", // Black border for selected
+        strokeOpacity: 1,
+      };
+    });
+  };
+
   const loadElectionData = async (map: google.maps.Map) => {
     try {
       const response = await fetch("/CO-precincts-with-results.geojson");
@@ -228,9 +407,7 @@ export function GoogleMap({
       map.data.addGeoJson(geojsonData);
 
       // Style the features
-      map.data.setStyle((feature) => {
-        const votesDem = (feature.getProperty("votes_dem") as number) || 0;
-        const votesRep = (feature.getProperty("votes_rep") as number) || 0;
+      map.data.setStyle((feature: google.maps.Data.Feature) => {
         const votesTotal = (feature.getProperty("votes_total") as number) || 0;
         const pctDemLead = (feature.getProperty("pct_dem_lead") as number) || 0;
 
@@ -266,6 +443,37 @@ export function GoogleMap({
 
         const { state, county } = parseGeoId(geoid);
         
+        // When user clicks on a precinct, switch back to precinct-level view
+        // This resets any county/state level aggregation that was previously selected
+        setCurrentView('precinct');
+        setAggregatedData(null);
+        setSelectedHierarchy({});
+        
+        // Reset map styling to normal (no special highlighting)
+        map.data.setStyle((feature: google.maps.Data.Feature) => {
+          const votesTotal = (feature.getProperty("votes_total") as number) || 0;
+          const pctDemLead = (feature.getProperty("pct_dem_lead") as number) || 0;
+
+          if (votesTotal === 0)
+            return {
+              fillColor: "#cccccc",
+              fillOpacity: 0.7,
+              strokeWeight: 0.5,
+              strokeColor: "#ffffff",
+            };
+
+          const fillColor = getColorForMargin(pctDemLead);
+
+          return {
+            fillColor,
+            fillOpacity: 0.8,
+            strokeWeight: 0.5,
+            strokeColor: "#ffffff",
+            strokeOpacity: 1,
+          };
+        });
+        
+        // Set the selected precinct data for the sidebar
         setSelectedPrecinct({
           geoid,
           state,
@@ -425,7 +633,252 @@ export function GoogleMap({
         }}
       >
         <div style={{ padding: "24px" }}>
-          {selectedPrecinct ? (
+          {/* 
+            Conditional rendering based on current view:
+            - If viewing aggregated data (county/state), show aggregated results
+            - If viewing a specific precinct, show precinct details
+            - If no selection, show the default welcome screen
+          */}
+          {currentView !== 'precinct' && aggregatedData ? (
+            <div>
+              {/* Header for aggregated view */}
+              <div style={{ marginBottom: "24px" }}>
+                <h2
+                  style={{
+                    margin: "0 0 8px 0",
+                    fontSize: "20px",
+                    fontWeight: "600",
+                    color: "#333",
+                  }}
+                >
+                  {currentView === 'state' ? 'State Results' : 'County Results'}
+                </h2>
+              </div>
+
+              {/* Breadcrumb Navigation for Aggregated View */}
+              <div style={{ marginBottom: "32px" }}>
+                <h3
+                  style={{
+                    fontSize: "16px",
+                    fontWeight: "600",
+                    marginBottom: "12px",
+                    color: "#333",
+                  }}
+                >
+                  Geographic Level
+                </h3>
+                <div style={{ fontSize: "14px", color: "#333" }}>
+                  <strong>{aggregatedData.name}</strong>
+                  <div style={{ marginTop: "8px", fontSize: "12px", color: "#666" }}>
+                    Viewing aggregated data from {aggregatedData.precinctCount} precincts
+                  </div>
+                </div>
+              </div>
+
+              {/* Aggregated Results Display */}
+              {/* This section shows the combined voting data for all precincts in the selected geography */}
+              <div style={{ marginBottom: "32px" }}>
+                <h3
+                  style={{
+                    fontSize: "18px",
+                    fontWeight: "600",
+                    marginBottom: "16px",
+                    color: "#333",
+                  }}
+                >
+                  Aggregated Election Results
+                </h3>
+
+                {(() => {
+                  const margin = Math.abs(aggregatedData.pctDemLead);
+                  const winner = aggregatedData.pctDemLead > 0 ? "Democratic" : "Republican";
+                  const winnerColor = aggregatedData.pctDemLead > 0 ? "#1f77b4" : "#d62728";
+                  const marginPercent = (margin * 100).toFixed(1);
+
+                  return (
+                    <div>
+                      <div
+                        style={{
+                          backgroundColor: winnerColor,
+                          color: "white",
+                          padding: "12px 16px",
+                          borderRadius: "6px",
+                          marginBottom: "16px",
+                          textAlign: "center",
+                        }}
+                      >
+                        <div style={{ fontSize: "16px", fontWeight: "600" }}>
+                          {winner} +{marginPercent}%
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* Aggregated Vote Breakdown */}
+                <div style={{ marginBottom: "16px" }}>
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      padding: "12px 0",
+                      borderBottom: "1px solid #eee",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                      <div
+                        style={{
+                          width: "12px",
+                          height: "12px",
+                          backgroundColor: "#1f77b4",
+                          borderRadius: "50%",
+                          marginRight: "8px",
+                        }}
+                      ></div>
+                      <span style={{ fontSize: "14px" }}>Democratic</span>
+                    </div>
+                    <div style={{ fontSize: "16px", fontWeight: "600" }}>
+                      {aggregatedData.votesDem.toLocaleString()}
+                    </div>
+                  </div>
+
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      padding: "12px 0",
+                      borderBottom: "1px solid #eee",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                      <div
+                        style={{
+                          width: "12px",
+                          height: "12px",
+                          backgroundColor: "#d62728",
+                          borderRadius: "50%",
+                          marginRight: "8px",
+                        }}
+                      ></div>
+                      <span style={{ fontSize: "14px" }}>Republican</span>
+                    </div>
+                    <div style={{ fontSize: "16px", fontWeight: "600" }}>
+                      {aggregatedData.votesRep.toLocaleString()}
+                    </div>
+                  </div>
+
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      padding: "12px 0 0 0",
+                    }}
+                  >
+                    <span style={{ fontSize: "14px", fontWeight: "600" }}>
+                      Total Votes
+                    </span>
+                    <div style={{ fontSize: "16px", fontWeight: "600" }}>
+                      {aggregatedData.votesTotal.toLocaleString()}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Aggregated Percentages */}
+                <div style={{ marginTop: "24px" }}>
+                  <h4
+                    style={{
+                      fontSize: "16px",
+                      fontWeight: "600",
+                      marginBottom: "12px",
+                      color: "#333",
+                    }}
+                  >
+                    Vote Share
+                  </h4>
+
+                  {(() => {
+                    const demPercent =
+                      aggregatedData.votesTotal > 0
+                        ? ((aggregatedData.votesDem / aggregatedData.votesTotal) * 100).toFixed(1)
+                        : "0.0";
+                    const repPercent =
+                      aggregatedData.votesTotal > 0
+                        ? ((aggregatedData.votesRep / aggregatedData.votesTotal) * 100).toFixed(1)
+                        : "0.0";
+
+                    return (
+                      <div>
+                        <div style={{ marginBottom: "8px" }}>
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              fontSize: "14px",
+                            }}
+                          >
+                            <span>Democratic</span>
+                            <span>{demPercent}%</span>
+                          </div>
+                          <div
+                            style={{
+                              width: "100%",
+                              height: "6px",
+                              backgroundColor: "#eee",
+                              borderRadius: "3px",
+                              marginTop: "4px",
+                              overflow: "hidden",
+                            }}
+                          >
+                            <div
+                              style={{
+                                width: `${demPercent}%`,
+                                height: "100%",
+                                backgroundColor: "#1f77b4",
+                              }}
+                            ></div>
+                          </div>
+                        </div>
+
+                        <div>
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              fontSize: "14px",
+                            }}
+                          >
+                            <span>Republican</span>
+                            <span>{repPercent}%</span>
+                          </div>
+                          <div
+                            style={{
+                              width: "100%",
+                              height: "6px",
+                              backgroundColor: "#eee",
+                              borderRadius: "3px",
+                              marginTop: "4px",
+                              overflow: "hidden",
+                            }}
+                          >
+                            <div
+                              style={{
+                                width: `${repPercent}%`,
+                                height: "100%",
+                                backgroundColor: "#d62728",
+                              }}
+                            ></div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              </div>
+            </div>
+          ) : selectedPrecinct ? (
             <div>
               {/* Header */}
               <div style={{ marginBottom: "24px" }}>
@@ -441,7 +894,13 @@ export function GoogleMap({
                 </h2>
               </div>
 
-              {/* Geographic Hierarchy */}
+              {/* 
+                Interactive Breadcrumb Navigation
+                This section creates clickable breadcrumb links that allow users to:
+                1. Click on the State name to view all precincts in that state (aggregated data)
+                2. Click on the County name to view all precincts in that county (aggregated data)
+                The precinct name is not clickable since it's the most specific level
+              */}
               <div style={{ marginBottom: "32px" }}>
                 <h3
                   style={{
@@ -463,9 +922,28 @@ export function GoogleMap({
                   >
                     State:{" "}
                   </span>
-                  <span style={{ fontSize: "14px", color: "#333" }}>
+                  {/* Clickable State Button */}
+                  <button
+                    onClick={() => handleBreadcrumbClick('state', selectedPrecinct.state)}
+                    style={{
+                      fontSize: "14px",
+                      color: "#0066cc",
+                      backgroundColor: "transparent",
+                      border: "none",
+                      cursor: "pointer",
+                      textDecoration: "underline",
+                      padding: "0",
+                      fontFamily: "inherit"
+                    }}
+                    onMouseOver={(e) => {
+                      e.currentTarget.style.color = "#004499";
+                    }}
+                    onMouseOut={(e) => {
+                      e.currentTarget.style.color = "#0066cc";
+                    }}
+                  >
                     {selectedPrecinct.state}
-                  </span>
+                  </button>
                 </div>
                 <div style={{ marginBottom: "8px" }}>
                   <span
@@ -477,9 +955,28 @@ export function GoogleMap({
                   >
                     County:{" "}
                   </span>
-                  <span style={{ fontSize: "14px", color: "#333" }}>
+                  {/* Clickable County Button */}
+                  <button
+                    onClick={() => handleBreadcrumbClick('county', selectedPrecinct.state, selectedPrecinct.county)}
+                    style={{
+                      fontSize: "14px",
+                      color: "#0066cc",
+                      backgroundColor: "transparent",
+                      border: "none",
+                      cursor: "pointer",
+                      textDecoration: "underline",
+                      padding: "0",
+                      fontFamily: "inherit"
+                    }}
+                    onMouseOver={(e) => {
+                      e.currentTarget.style.color = "#004499";
+                    }}
+                    onMouseOut={(e) => {
+                      e.currentTarget.style.color = "#0066cc";
+                    }}
+                  >
                     {selectedPrecinct.county} County
-                  </span>
+                  </button>
                 </div>
                 <div style={{ marginBottom: "8px" }}>
                   <span
@@ -491,6 +988,7 @@ export function GoogleMap({
                   >
                     Precinct:{" "}
                   </span>
+                  {/* Non-clickable Precinct ID - this is the most specific level */}
                   <span style={{ fontSize: "14px", color: "#333" }}>
                     {selectedPrecinct.geoid}
                   </span>
@@ -923,7 +1421,10 @@ export function GoogleMap({
                   • Click any colored precinct on the map
                   <br />
                   • View detailed vote counts and percentages
-                  <br />• See which county the precinct belongs to
+                  <br />
+                  • Click on State or County names to view aggregated results
+                  <br />
+                  • Watch highlighted precincts show the selected area
                 </div>
               </div>
 
