@@ -20,7 +20,7 @@ interface GoogleMapProps {
 // US state FIPS codes to names mapping
 const US_STATES: Record<string, string> = {
   "01": "Alabama",
-  "02": "Alaska", 
+  "02": "Alaska",
   "04": "Arizona",
   "05": "Arkansas",
   "06": "California",
@@ -74,7 +74,7 @@ const US_STATES: Record<string, string> = {
   "66": "Guam",
   "69": "Northern Mariana Islands",
   "72": "Puerto Rico",
-  "78": "Virgin Islands"
+  "78": "Virgin Islands",
 };
 
 // Colorado county FIPS codes to names mapping
@@ -157,6 +157,7 @@ export function GoogleMap({
   const [selectedPrecinct, setSelectedPrecinct] = useState<PrecinctData | null>(
     null
   );
+  const [rawElectionData, setRawElectionData] = useState<any>(null);
 
   const getColorForMargin = (pctDemLead: number): string => {
     // NYTimes-style color scheme
@@ -177,32 +178,34 @@ export function GoogleMap({
     }
   };
 
-  const parseGeoId = (geoid: string): { state: string; county: string; precinct: string } => {
+  const parseGeoId = (
+    geoid: string
+  ): { state: string; county: string; precinct: string } => {
     // GEOID format: {state_code}{county_code}-{precinct_id}
     // Example: "08001-8134801173"
-    
+
     /**
      * Regex breakdown: /^(\d{2})(\d{3})-(.+)$/
-     * 
+     *
      * ^            - Start of string anchor (ensures we match from beginning)
      * (\d{2})      - Capture group 1: Exactly 2 digits (state FIPS code)
      *                \d = digit (0-9), {2} = exactly 2 times
      * (\d{3})      - Capture group 2: Exactly 3 digits (county FIPS code)
-     *                \d = digit (0-9), {3} = exactly 3 times  
+     *                \d = digit (0-9), {3} = exactly 3 times
      * -            - Literal dash character (separator)
      * (.+)         - Capture group 3: One or more of any character (precinct ID)
      *                . = any character, + = one or more times
      * $            - End of string anchor (ensures we match to end)
-     * 
+     *
      * Result: match[1] = state code, match[2] = county code, match[3] = precinct ID
      */
     const match = geoid.match(/^(\d{2})(\d{3})-(.+)$/);
     if (!match) return { state: "Unknown", county: "Unknown", precinct: geoid };
 
-    const stateCode = match[1];   // "08" from "08001-8134801173"
-    const countyCode = match[2];  // "001" from "08001-8134801173"
-    const precinctId = match[3];  // "8134801173" from "08001-8134801173"
-    
+    const stateCode = match[1]; // "08" from "08001-8134801173"
+    const countyCode = match[2]; // "001" from "08001-8134801173"
+    const precinctId = match[3]; // "8134801173" from "08001-8134801173"
+
     const stateName = US_STATES[stateCode] || `State ${stateCode}`;
     const countyName = COLORADO_COUNTIES[countyCode] || `County ${countyCode}`;
 
@@ -216,6 +219,10 @@ export function GoogleMap({
         throw new Error(`Failed to load data: ${response.statusText}`);
       }
       const geojsonData = await response.json();
+
+      // Store raw data for rollup calculations
+      setRawElectionData(geojsonData);
+      console.log("Raw election data loaded:", geojsonData);
 
       // Add GeoJSON layer
       map.data.addGeoJson(geojsonData);
@@ -258,7 +265,7 @@ export function GoogleMap({
         const pctDemLead = (feature.getProperty("pct_dem_lead") as number) || 0;
 
         const { state, county } = parseGeoId(geoid);
-
+        
         setSelectedPrecinct({
           geoid,
           state,
@@ -447,7 +454,13 @@ export function GoogleMap({
                   Location
                 </h3>
                 <div style={{ marginBottom: "8px" }}>
-                  <span style={{ fontSize: "14px", fontWeight: "600", color: "#666" }}>
+                  <span
+                    style={{
+                      fontSize: "14px",
+                      fontWeight: "600",
+                      color: "#666",
+                    }}
+                  >
                     State:{" "}
                   </span>
                   <span style={{ fontSize: "14px", color: "#333" }}>
@@ -455,7 +468,13 @@ export function GoogleMap({
                   </span>
                 </div>
                 <div style={{ marginBottom: "8px" }}>
-                  <span style={{ fontSize: "14px", fontWeight: "600", color: "#666" }}>
+                  <span
+                    style={{
+                      fontSize: "14px",
+                      fontWeight: "600",
+                      color: "#666",
+                    }}
+                  >
                     County:{" "}
                   </span>
                   <span style={{ fontSize: "14px", color: "#333" }}>
@@ -463,7 +482,13 @@ export function GoogleMap({
                   </span>
                 </div>
                 <div style={{ marginBottom: "8px" }}>
-                  <span style={{ fontSize: "14px", fontWeight: "600", color: "#666" }}>
+                  <span
+                    style={{
+                      fontSize: "14px",
+                      fontWeight: "600",
+                      color: "#666",
+                    }}
+                  >
                     Precinct:{" "}
                   </span>
                   <span style={{ fontSize: "14px", color: "#333" }}>
@@ -883,6 +908,7 @@ export function GoogleMap({
                   backgroundColor: "#f8f9fa",
                   borderRadius: "6px",
                   border: "1px solid #e9ecef",
+                  marginBottom: "16px",
                 }}
               >
                 <div
@@ -899,6 +925,39 @@ export function GoogleMap({
                   • View detailed vote counts and percentages
                   <br />• See which county the precinct belongs to
                 </div>
+              </div>
+
+              {/* Debug Section */}
+              <div>
+                <h3
+                  style={{
+                    fontSize: "16px",
+                    fontWeight: "600",
+                    marginBottom: "12px",
+                    color: "#333",
+                  }}
+                >
+                  Data Access
+                </h3>
+                <button
+                  onClick={() => {
+                    console.log("Raw Election Data:", rawElectionData);
+                    console.log("Total features:", rawElectionData?.features?.length || 0);
+                  }}
+                  style={{
+                    width: "100%",
+                    padding: "12px",
+                    backgroundColor: "#007bff",
+                    color: "white",
+                    border: "none",
+                    borderRadius: "6px",
+                    fontSize: "14px",
+                    fontWeight: "600",
+                    cursor: "pointer",
+                  }}
+                >
+                  Log Raw Election Data
+                </button>
               </div>
             </div>
           )}
